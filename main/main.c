@@ -28,9 +28,7 @@ static const char *TAG = "MONITOR";
 #define LED_RED_PIN                 5
 
 typedef struct {
-    float temperature_aht20;
-    float humidity;
-    float temperature_bmp280;
+    float temperature;
     float pressure;
 } sensor_data_t;
 
@@ -80,38 +78,25 @@ static void gpio_init(void)
 
 static esp_err_t aht20_init(void)
 {
-    // Comando de soft reset primeiro
+    // Comando de soft reset
     uint8_t reset_cmd[] = {0xBA};
     esp_err_t ret = i2c_master_write_to_device(I2C_MASTER_NUM, AHT20_ADDR, reset_cmd, sizeof(reset_cmd),
                                               I2C_MASTER_TIMEOUT_MS / portTICK_PERIOD_MS);
     if (ret != ESP_OK) return ret;
     
-    vTaskDelay(pdMS_TO_TICKS(20)); // Aguardar reset
+    vTaskDelay(pdMS_TO_TICKS(20));
     
     // Comando de inicializacao/calibracao
     uint8_t init_cmd[] = {0xBE, 0x08, 0x00};
     ret = i2c_master_write_to_device(I2C_MASTER_NUM, AHT20_ADDR, init_cmd, sizeof(init_cmd),
                                     I2C_MASTER_TIMEOUT_MS / portTICK_PERIOD_MS);
     
-    vTaskDelay(pdMS_TO_TICKS(100)); // Aguardar calibracao mais tempo
-    
-    // Verificar se calibrou corretamente
-    uint8_t status;
-    ret = i2c_master_read_from_device(I2C_MASTER_NUM, AHT20_ADDR, &status, 1,
-                                     I2C_MASTER_TIMEOUT_MS / portTICK_PERIOD_MS);
-    
-    if (ret == ESP_OK) {
-        if ((status & 0x08) == 0) {
-            ESP_LOGW("AHT20", "Calibracao falhou! Status: 0x%02X", (unsigned int)status);
-        } else {
-            ESP_LOGI("AHT20", "Calibracao OK! Status: 0x%02X", (unsigned int)status);
-        }
-    }
+    vTaskDelay(pdMS_TO_TICKS(100));
     
     return ret;
 }
 
-static esp_err_t aht20_read(float *temperature, float *humidity)
+static esp_err_t aht20_read_temperature(float *temperature)
 {
     uint8_t trigger_cmd[] = {0xAC, 0x33, 0x00};
     uint8_t data[6];
@@ -120,44 +105,25 @@ static esp_err_t aht20_read(float *temperature, float *humidity)
                                               sizeof(trigger_cmd), I2C_MASTER_TIMEOUT_MS / portTICK_PERIOD_MS);
     if (ret != ESP_OK) return ret;
     
-    // Aguardar conversao - AHT20 precisa de pelo menos 75ms
     vTaskDelay(pdMS_TO_TICKS(100));
     
-    // Verificar se sensor esta pronto (bit 7 do status deve ser 0)
+    // Ler dados
     for (int tentativa = 0; tentativa < 10; tentativa++) {
         ret = i2c_master_read_from_device(I2C_MASTER_NUM, AHT20_ADDR, data, sizeof(data),
                                          I2C_MASTER_TIMEOUT_MS / portTICK_PERIOD_MS);
         if (ret != ESP_OK) return ret;
         
-        // Verificar bit de busy (bit 7 = 0 significa pronto)
-        if ((data[0] & 0x80) == 0) break;
-        
-        vTaskDelay(pdMS_TO_TICKS(10)); // Aguardar mais um pouco
+        if ((data[0] & 0x80) == 0) break; // Sensor pronto
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
     
-    // Verificar se dados sao validos (bit 3 = 1 significa calibrado)
-    if ((data[0] & 0x08) == 0) {
-        ESP_LOGW("AHT20", "Sensor nao calibrado!");
-    }
-    
-    uint32_t humidity_raw = ((uint32_t)data[1] << 12) | ((uint32_t)data[2] << 4) | (data[3] >> 4);
+    // Extrair apenas temperatura (ignorar umidade)
     uint32_t temperature_raw = (((uint32_t)data[3] & 0xF) << 16) | ((uint32_t)data[4] << 8) | data[5];
-    
-    // Debug dos dados raw para diagnosticar problema da umidade
-    ESP_LOGI("AHT20", "Status: 0x%02X", data[0]);
-    ESP_LOGI("AHT20", "Dados brutos: %02X %02X %02X %02X %02X %02X", 
-             data[0], data[1], data[2], data[3], data[4], data[5]);
-    ESP_LOGI("AHT20", "Umidade raw: %u, Temp raw: %u", 
-             (unsigned int)humidity_raw, (unsigned int)temperature_raw);
-    
-    *humidity = (float)humidity_raw * 100.0 / 1048576.0;
     *temperature = (float)temperature_raw * 200.0 / 1048576.0 - 50.0;
-    
-    ESP_LOGI("AHT20", "Umidade calculada: %.2f%%, Temp calculada: %.2fC", 
-             *humidity, *temperature);
     
     return ESP_OK;
 }
+
 
 static esp_err_t bmp280_init(void)
 {
@@ -193,16 +159,17 @@ static void sensor_task(void *pvParameters)
     ESP_LOGI(TAG, "Iniciando leitura de sensores");
     
     while (1) {
-        esp_err_t ret_aht20 = aht20_read(&g_sensor_data.temperature_aht20, &g_sensor_data.humidity);
-        esp_err_t ret_bmp280 = bmp280_read(&g_sensor_data.temperature_bmp280, &g_sensor_data.pressure);
+        float bmp_temp; // Temperatura do BMP280 (não usada)
+        esp_err_t ret_aht20 = aht20_read_temperature(&g_sensor_data.temperature);
+        esp_err_t ret_bmp280 = bmp280_read(&bmp_temp, &g_sensor_data.pressure);
         
         if (ret_aht20 == ESP_OK && ret_bmp280 == ESP_OK) {
-            ESP_LOGI(TAG, "AHT20 - Temp: %.1f°C, Umidade: %.1f%%", 
-                    g_sensor_data.temperature_aht20, g_sensor_data.humidity);
-            ESP_LOGI(TAG, "BMP280 - Temp: %.1f°C, Pressao: %.1fhPa", 
-                    g_sensor_data.temperature_bmp280, g_sensor_data.pressure);
+            ESP_LOGI(TAG, "AHT20 - Temp: %.1f°C", g_sensor_data.temperature);
+            ESP_LOGI(TAG, "BMP280 - Pressao: %.1fhPa", g_sensor_data.pressure);
         } else {
-            ESP_LOGE(TAG, "Erro na leitura dos sensores");
+            ESP_LOGE(TAG, "Erro na leitura dos sensores - AHT20: %s, BMP280: %s",
+                    (ret_aht20 == ESP_OK) ? "OK" : "FALHA",
+                    (ret_bmp280 == ESP_OK) ? "OK" : "FALHA");
         }
         
         vTaskDelay(pdMS_TO_TICKS(2000));
@@ -240,14 +207,11 @@ static void display_task(void *pvParameters)
             }
             clear_counter--;
             
-            snprintf(line_buffer, sizeof(line_buffer), "TEMPERATURA: %.1fC", g_sensor_data.temperature_aht20);
+            snprintf(line_buffer, sizeof(line_buffer), "TEMPERATURA: %.1fC", g_sensor_data.temperature);
             ssd1306_display_text(0, line_buffer);
             
-            snprintf(line_buffer, sizeof(line_buffer), "UMIDADE: %.1f%%", g_sensor_data.humidity);
-            ssd1306_display_text(2, line_buffer);
-            
             snprintf(line_buffer, sizeof(line_buffer), "PRESSAO: %.1f HPA", g_sensor_data.pressure);
-            ssd1306_display_text(4, line_buffer);
+            ssd1306_display_text(2, line_buffer);
             
             esp_err_t ret = ssd1306_update_display();
             if (ret != ESP_OK) {
@@ -267,7 +231,7 @@ static void led_task(void *pvParameters)
         gpio_set_level(LED_YELLOW_PIN, 0);
         gpio_set_level(LED_RED_PIN, 0);
         
-        if (g_sensor_data.temperature_aht20 > 30.0 || g_sensor_data.temperature_aht20 < 15.0) {
+        if (g_sensor_data.temperature > 30.0 || g_sensor_data.temperature < 15.0) {
             gpio_set_level(LED_YELLOW_PIN, 1);
             gpio_set_level(LED_GREEN_PIN, 0);
         }
@@ -335,7 +299,7 @@ void app_main(void)
     ESP_ERROR_CHECK(i2c_master_init());
     gpio_init();
     
-    ESP_LOGI(TAG, "Testando sensores...");
+    ESP_LOGI(TAG, "Testando sensores AHT20 e BMP280...");
     
     // Teste AHT20
     esp_err_t aht20_ret = aht20_init();
