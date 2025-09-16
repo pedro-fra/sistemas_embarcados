@@ -1,0 +1,29 @@
+# ESP-IDF build files
+build/
+dist/
+*.egg-info/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# ESP-IDF specific
+sdkconfig.old
+dependencies.lock
+
+# Claude specific
+.claude/
+
+*.md
