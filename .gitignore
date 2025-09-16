@@ -25,5 +25,7 @@ dependencies.lock
 
 # Claude specific
 .claude/
+.devcontainer
+.clangd
 
 *.md
